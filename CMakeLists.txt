@@ -167,7 +167,7 @@ add_compile_definitions(REXGLUE_BUILD_CONFIG="$<CONFIG>")
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rex_version.cmake)
 # Pin the publication snapshot so ZIP sources and Git checkouts agree.
-set(REXGLUE_FULL_VERSION "0.8.2.94-skate3.20261029")
+set(REXGLUE_FULL_VERSION "0.8.2.95-skate3.20261029")
 
 # Strip the -id trailer (if any) for the numeric-only version.
 string(REGEX REPLACE "-.*$" "" REXGLUE_NUMERIC_VERSION "${REXGLUE_FULL_VERSION}")

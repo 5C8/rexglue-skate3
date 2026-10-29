@@ -29,6 +29,8 @@ Keep the SDK folder structure intact. This package targets x86-64-v3 CPUs
   community online play and multiple local game processes.
 - UI/presenter/window fixes, configuration handling and graphics diagnostics.
 - PowerPC code-generation discovery/scanning improvements needed by these builds.
+- XEX update loading recognizes an already updated image and skips reapplying
+  its delta patch, supporting both disc-plus-update and pre-updated TU3 inputs.
 
 ## Build from source
 
@@ -48,7 +50,7 @@ cmake --install out/build/win-amd64 --config Release --prefix C:/Dev/rex-sdk
 
 If dependencies were omitted, run `git submodule update --init --recursive`.
 The pinned Tracy dependency receives the checked-in Windows compatibility patch
-at configure time. The source snapshot pins SDK version 0.8.2.94 so source ZIPs
+at configure time. The source snapshot pins SDK version 0.8.2.95 so source ZIPs
 and Git checkouts expose the same consumer package version.
 
 `REXGLUE_BUILD_TESTS` defaults to OFF. Instruction tests additionally require

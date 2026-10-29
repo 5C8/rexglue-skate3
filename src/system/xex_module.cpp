@@ -256,6 +256,19 @@ int XexModule::ApplyPatch(XexModule* module) {
   GetOptHeader(XEX_HEADER_DELTA_PATCH_DESCRIPTOR, reinterpret_cast<void**>(&patch_header));
   assert_not_null(patch_header);
 
+  // A pre-updated dump may still have the update sidecar next to it. Applying
+  // that delta twice corrupts the image; the target version is already ready.
+  if (const auto* execution = module->opt_execution_info();
+      execution && patch_header->source_version_value != patch_header->target_version_value &&
+      execution->version_value == patch_header->target_version_value) {
+    const auto* patch_execution = opt_execution_info();
+    if (!patch_execution || patch_execution->title_id == execution->title_id) {
+      REXLOG_INFO("XEX already has patch target version {:08X}; skipping repeated update",
+                  uint32_t(patch_header->target_version_value));
+      return 0;
+    }
+  }
+
   // Compare hash inside delta descriptor to base XEX signature
   uint8_t digest[0x14];
   sha1::SHA1 s;
