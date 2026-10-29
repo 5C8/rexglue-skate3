@@ -1,0 +1,12 @@
+diff --git a/public/client/TracyProfiler.cpp b/public/client/TracyProfiler.cpp
+index 0691f78e..28ac0922 100644
+--- a/public/client/TracyProfiler.cpp
++++ b/public/client/TracyProfiler.cpp
+@@ -1,3 +1,7 @@
++#if defined(_WIN32) && !defined(fileno)
++#define fileno _fileno
++#endif
++
+ #ifdef TRACY_ENABLE
+ 
+ #ifdef _WIN32
