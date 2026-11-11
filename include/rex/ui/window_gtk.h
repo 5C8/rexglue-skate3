@@ -12,6 +12,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <rex/platform.h>
@@ -76,11 +77,15 @@ class GTKWindow : public Window {
   static gboolean DrawingAreaEventHandlerThunk(GtkWidget* widget, GdkEvent* event,
                                                gpointer user_data);
   static gboolean DrawHandler(GtkWidget* widget, cairo_t* cr, gpointer data);
+  static gboolean PaintIdleCallback(gpointer user_data);
+  void CancelPendingPaint();
 
   // Non-owning (initially floating) references to the widgets.
   GtkWidget* window_ = nullptr;
   GtkWidget* box_ = nullptr;
   GtkWidget* drawing_area_ = nullptr;
+  std::mutex paint_idle_mutex_;
+  guint paint_idle_source_ = 0;
   GdkCursor* blank_cursor_ = nullptr;
   guint cursor_auto_hide_timer_ = 0;
   bool cursor_currently_auto_hidden_ = false;

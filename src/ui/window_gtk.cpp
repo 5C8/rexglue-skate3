@@ -361,6 +361,7 @@ GTKWindow::GTKWindow(WindowedAppContext& app_context, const std::string_view tit
 
 GTKWindow::~GTKWindow() {
   EnterDestructor();
+  CancelPendingPaint();
   if (cursor_auto_hide_timer_) {
     g_source_remove(cursor_auto_hide_timer_);
     cursor_auto_hide_timer_ = 0;
@@ -684,7 +685,43 @@ std::unique_ptr<Surface> GTKWindow::CreateSurfaceImpl(Surface::TypeFlags allowed
 }
 
 void GTKWindow::RequestPaintImpl() {
-  gtk_widget_queue_draw(drawing_area_);
+  if (app_context().IsInUIThread()) {
+    if (drawing_area_) {
+      gtk_widget_queue_draw(drawing_area_);
+    }
+    return;
+  }
+
+  // The presenter may request a redraw from the GPU thread. Only the GTK
+  // thread may touch the drawing area.
+  std::lock_guard<std::mutex> lock(paint_idle_mutex_);
+  if (!paint_idle_source_) {
+    paint_idle_source_ = g_idle_add_full(G_PRIORITY_HIGH_IDLE, PaintIdleCallback, this, nullptr);
+  }
+}
+
+gboolean GTKWindow::PaintIdleCallback(gpointer user_data) {
+  auto* window = static_cast<GTKWindow*>(user_data);
+  {
+    // Release the slot before queuing the redraw so a concurrent request can
+    // schedule another callback if needed.
+    std::lock_guard<std::mutex> lock(window->paint_idle_mutex_);
+    window->paint_idle_source_ = 0;
+  }
+  if (window->drawing_area_) {
+    gtk_widget_queue_draw(window->drawing_area_);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+void GTKWindow::CancelPendingPaint() {
+  // Called on the UI thread after detaching the presenter's surface, so the
+  // GPU thread can no longer schedule callbacks for this window.
+  std::lock_guard<std::mutex> lock(paint_idle_mutex_);
+  if (paint_idle_source_) {
+    g_source_remove(paint_idle_source_);
+    paint_idle_source_ = 0;
+  }
 }
 
 void GTKWindow::HandleSizeUpdate(WindowDestructionReceiver& destruction_receiver) {
@@ -859,6 +896,7 @@ gboolean GTKWindow::WindowEventHandler(GdkEvent* event) {
       if (destruction_receiver.IsWindowDestroyed()) {
         break;
       }
+      CancelPendingPaint();
       // Set window_ to null to ignore events from now on since this
       // ui::GTKWindow is entering an indeterminate state - this should be done
       // at some point in closing anyway.
