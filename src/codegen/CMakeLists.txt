@@ -105,6 +105,7 @@ add_dependencies(rexcodegen embed_templates)
 target_include_directories(rexcodegen
     PUBLIC
         $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
+        $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
         $<BUILD_INTERFACE:${REXGLUE_ROOT}/thirdparty/inja/single_include>
         $<BUILD_INTERFACE:${REXGLUE_ROOT}/thirdparty/inja/third_party/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -117,7 +118,8 @@ target_include_directories(rexcodegen
 
 target_link_libraries(rexcodegen
     PUBLIC
-        rexcore
+        # rexruntime already owns rexcore. Linking its object library here
+        # duplicates the cvar registry and registrars in the CLI executable.
         rexruntime
         fmt::fmt
         spdlog::spdlog
