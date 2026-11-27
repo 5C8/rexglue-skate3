@@ -312,6 +312,11 @@ class NrTextureViewD3D12 : public nrhi::TextureView {
 class NrBindingLayoutD3D12 : public nrhi::BindingLayout {
  public:
   ID3D12RootSignature* root_signature = nullptr;
+  // Parameter kinds/sizes, kept so SetBindingLayout can give every root
+  // parameter a safe default (see NrCmdD3D12::SetBindingLayout).
+  uint32_t param_count = 0;
+  nrhi::BindingParamKind kinds[nrhi::kMaxBindingParams] = {};
+  uint32_t counts[nrhi::kMaxBindingParams] = {};
 };
 
 class NrShaderD3D12 : public nrhi::Shader {
@@ -506,6 +511,7 @@ class NrDeviceD3D12 : public nrhi::Device {
     srv_slots_.capacity = kShaderVisibleViews;
     rtv_slots_.capacity = kRtvSlots;
     dsv_slots_.capacity = kDsvSlots;
+    InitBindingDefaults();
     // Resolve the device's adapter for the periodic VRAM telemetry
     // (process-local usage vs the OS-granted budget, the same numbers the
     // OS shows per process). Optional: the log line is skipped when any
@@ -551,6 +557,7 @@ class NrDeviceD3D12 : public nrhi::Device {
       entry.second->resource->Release();
       delete entry.second;
     }
+    if (default_buffer_) default_buffer_->Release();
     if (rhi_fence_) rhi_fence_->Release();
     if (rhi_event_) CloseHandle(rhi_event_);
     if (staging_heap_) staging_heap_->Release();
@@ -560,6 +567,60 @@ class NrDeviceD3D12 : public nrhi::Device {
   }
 
   Backend backend() const override { return Backend::kD3D12; }
+
+  // Safe defaults for root parameters a pass leaves unbound. Setting a root
+  // signature resets every root argument to undefined; NVIDIA in practice
+  // keeps reading the previous binding, AMD reads address 0 -- a pass whose
+  // shader touched an unbound root CBV (vs_main reads b1's tree_anim at
+  // byte 0x1100 on every vertex; the shadow-caster passes never bound b1)
+  // page-faulted at GPU VA 0x1000 and the device hung (DRED, RX 7600 XT).
+  // Likewise a table entry passed as nullptr used to keep whatever
+  // descriptor the shader-visible slot last held (possibly a destroyed
+  // texture's); it now gets a null SRV, which reads as zero.
+  void InitBindingDefaults() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!staging_slots_.Alloc(1, &null_srv_staging_slot_) ||
+          !srv_slots_.Alloc(nrhi::kMaxTextureTableSize, &null_table_slot_)) {
+        null_srv_staging_slot_ = ~0u;
+        null_table_slot_ = ~0u;
+      }
+    }
+    if (null_srv_staging_slot_ != ~0u) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC null_desc{};
+      null_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      null_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+      null_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      null_desc.Texture2D.MipLevels = 1;
+      device_->CreateShaderResourceView(nullptr, &null_desc,
+                                        StagingHandle(null_srv_staging_slot_));
+      for (uint32_t i = 0; i < nrhi::kMaxTextureTableSize; ++i) {
+        device_->CopyDescriptorsSimple(1, SrvCpuHandle(null_table_slot_ + i),
+                                       StagingHandle(null_srv_staging_slot_),
+                                       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      }
+    }
+    // 64 KB = the largest constant buffer a shader can address; zero-filled
+    // (committed without CREATE_NOT_ZEROED), read-only for its lifetime.
+    D3D12_RESOURCE_DESC rd{};
+    ui::d3d12::util::FillBufferResourceDesc(rd, kDefaultBufferSize, D3D12_RESOURCE_FLAG_NONE);
+    if (SUCCEEDED(device_->CreateCommittedResource(
+            &ui::d3d12::util::kHeapPropertiesUpload, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&default_buffer_)))) {
+      void* mapping = nullptr;
+      const D3D12_RANGE no_read{};
+      if (SUCCEEDED(default_buffer_->Map(0, &no_read, &mapping))) {
+        std::memset(mapping, 0, kDefaultBufferSize);
+        default_buffer_->Unmap(0, nullptr);
+      }
+      default_buffer_va_ = default_buffer_->GetGPUVirtualAddress();
+    } else {
+      REXLOG_ERROR("nrhi-d3d12: default binding buffer creation failed");
+    }
+  }
+  D3D12_GPU_VIRTUAL_ADDRESS default_buffer_va() const { return default_buffer_va_; }
+  bool has_null_table() const { return null_table_slot_ != ~0u; }
+  D3D12_GPU_DESCRIPTOR_HANDLE null_table() const { return SrvGpuHandle(null_table_slot_); }
 
   nrhi::Buffer* CreateBuffer(const nrhi::BufferDesc& desc) override {
     D3D12_RESOURCE_DESC rd{};
@@ -626,10 +687,24 @@ class NrDeviceD3D12 : public nrhi::Device {
       clear.DepthStencil.Depth = desc.clear_depth;
       clear_ptr = &clear;
     }
+    // Render targets and depth buffers must NOT use CREATE_NOT_ZEROED: such a
+    // resource has to be initialised with a Clear/Discard/Copy before any
+    // other use (debug layer error #1422), and several native passes draw or
+    // load into a fresh target before clearing it. NVIDIA tolerates that; on
+    // AMD the target's compression metadata (DCC/HTILE) is then garbage and the
+    // first draw into it hangs the GPU (DEVICE_HUNG ~seconds into gameplay on
+    // an RX 7600 XT, while Vulkan -- whose UNDEFINED->attachment transition
+    // initialises the metadata -- ran fine). A zeroed committed resource is
+    // fully initialised by the driver; these targets are created rarely, so
+    // the zero-fill costs nothing measurable.
+    const bool attachment =
+        (desc.usage & (nrhi::kTextureUsageRenderTarget | nrhi::kTextureUsageDepthStencil)) != 0;
     ID3D12Resource* resource = nullptr;
     if (FAILED(device_->CreateCommittedResource(
             &ui::d3d12::util::kHeapPropertiesDefault,
-            cp_->GetD3D12Provider().GetHeapFlagCreateNotZeroed(), &rd,
+            attachment ? D3D12_HEAP_FLAG_NONE
+                       : cp_->GetD3D12Provider().GetHeapFlagCreateNotZeroed(),
+            &rd,
             ToStates(desc.initial_state, guest_output_state_), clear_ptr,
             IID_PPV_ARGS(&resource)))) {
       REXLOG_ERROR("nrhi-d3d12: texture creation failed ({}x{} fmt {})", desc.width,
@@ -868,6 +943,11 @@ class NrDeviceD3D12 : public nrhi::Device {
     }
     auto* layout = new NrBindingLayoutD3D12();
     layout->root_signature = root_signature;
+    layout->param_count = desc.param_count;
+    for (uint32_t i = 0; i < desc.param_count; ++i) {
+      layout->kinds[i] = desc.params[i].kind;
+      layout->counts[i] = desc.params[i].count;
+    }
     return layout;
   }
 
@@ -1224,9 +1304,10 @@ class NrDeviceD3D12 : public nrhi::Device {
         }
       }
       for (uint32_t i = 0; i < count; ++i) {
-        if (views[i] == nullptr) continue;
-        device_->CopyDescriptorsSimple(1, SrvCpuHandle(first_slot + i),
-                                       StagingHandle(views[i]->staging_slot),
+        const uint32_t source =
+            views[i] != nullptr ? views[i]->staging_slot : null_srv_staging_slot_;
+        if (source == ~0u) continue;
+        device_->CopyDescriptorsSimple(1, SrvCpuHandle(first_slot + i), StagingHandle(source),
                                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
       }
       it = bindings_.emplace(key, Binding{first_slot, count}).first;
@@ -1377,6 +1458,11 @@ class NrDeviceD3D12 : public nrhi::Device {
   std::condition_variable release_cv_;
   std::vector<RetiredObject> release_queue_;
   bool release_exit_ = false;
+  static constexpr uint64_t kDefaultBufferSize = 65536;
+  ID3D12Resource* default_buffer_ = nullptr;
+  D3D12_GPU_VIRTUAL_ADDRESS default_buffer_va_ = 0;
+  uint32_t null_srv_staging_slot_ = ~0u;
+  uint32_t null_table_slot_ = ~0u;
   SlotAllocator staging_slots_;
   SlotAllocator srv_slots_;
   SlotAllocator rtv_slots_;
@@ -1401,6 +1487,31 @@ void NrCmdD3D12::SetBindingLayout(nrhi::BindingLayout* layout) {
   list.D3DSetGraphicsRootSignature(l->root_signature);
   // Root-signature semantics: all bindings reset.
   ResetFrameState();
+  // ...to undefined, which AMD reads as address 0 (see
+  // NrDeviceD3D12::InitBindingDefaults). Give every parameter a safe default;
+  // the pass overrides what it actually uses. A root SRV has no size, so the
+  // zero buffer also bounds the reach of a stray structured-buffer index.
+  static const uint32_t kZeros[64] = {};
+  const D3D12_GPU_VIRTUAL_ADDRESS zero_va = device->default_buffer_va();
+  for (uint32_t i = 0; i < l->param_count; ++i) {
+    switch (l->kinds[i]) {
+      case nrhi::BindingParamKind::kConstants:
+        list.D3DSetGraphicsRoot32BitConstants(i, std::min<uint32_t>(l->counts[i], 64), kZeros,
+                                              0);
+        break;
+      case nrhi::BindingParamKind::kConstantBuffer:
+        if (zero_va != 0) list.D3DSetGraphicsRootConstantBufferView(i, zero_va);
+        break;
+      case nrhi::BindingParamKind::kBufferSrv:
+        if (zero_va != 0) list.D3DSetGraphicsRootShaderResourceView(i, zero_va);
+        break;
+      case nrhi::BindingParamKind::kTextureTable:
+        if (device->has_null_table() && l->counts[i] <= nrhi::kMaxTextureTableSize) {
+          list.D3DSetGraphicsRootDescriptorTable(i, device->null_table());
+        }
+        break;
+    }
+  }
 }
 
 void NrCmdD3D12::SetPipeline(nrhi::Pipeline* pipeline) {

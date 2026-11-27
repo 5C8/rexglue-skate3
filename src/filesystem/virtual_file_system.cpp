@@ -188,13 +188,13 @@ VirtualFileSystem::~VirtualFileSystem() {
 }
 
 bool VirtualFileSystem::RegisterDevice(std::unique_ptr<Device> device) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   devices_.emplace_back(std::move(device));
   return true;
 }
 
 bool VirtualFileSystem::UnregisterDevice(const std::string_view path) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   for (auto it = devices_.begin(); it != devices_.end(); ++it) {
     if ((*it)->mount_path() == path) {
       REXFS_DEBUG("Unregistered device: {}", (*it)->mount_path());
@@ -207,7 +207,7 @@ bool VirtualFileSystem::UnregisterDevice(const std::string_view path) {
 
 bool VirtualFileSystem::RegisterSymbolicLink(const std::string_view path,
                                              const std::string_view target) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   symlinks_.insert({std::string(path), std::string(target)});
   REXFS_DEBUG("Registered symbolic link: {} => {}", path, target);
 
@@ -215,7 +215,7 @@ bool VirtualFileSystem::RegisterSymbolicLink(const std::string_view path,
 }
 
 bool VirtualFileSystem::UnregisterSymbolicLink(const std::string_view path) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   auto it = std::find_if(symlinks_.cbegin(), symlinks_.cend(), [&](const auto& s) {
     return rex::string::utf8_equal_case(path, s.first);
   });
@@ -258,8 +258,13 @@ bool VirtualFileSystem::ResolveSymbolicLink(const std::string_view path, std::st
   return was_resolved;
 }
 
+std::unique_lock<std::recursive_mutex> FsLock() {
+  static std::recursive_mutex fs_mutex;
+  return std::unique_lock<std::recursive_mutex>(fs_mutex);
+}
+
 Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
 
   // Resolve relative paths
   auto normalized_path(rex::string::utf8_canonicalize_guest_path(path));

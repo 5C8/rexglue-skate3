@@ -30,6 +30,15 @@ class XFile;
 
 namespace rex::filesystem {
 
+// The file system's own lock (VFS devices/symlinks, entry trees). It used to
+// be the process-wide global critical region, which every recompiled guest
+// atomic (mtmsrd sections) also takes: a streaming thread resolving a path
+// (canonicalize, symlinks, host disk lookup, not-found logging) stalled
+// every guest thread's atomics for the duration (measured in sk83: ~80% of
+// the guest render thread's blocked time in slow frames). Lock order: the
+// file system never takes the global region while holding this.
+std::unique_lock<std::recursive_mutex> FsLock();
+
 class Device;
 class File;
 

@@ -271,6 +271,7 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
+  bool IssueNativeInterFrame() override;
 
   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address, uint32_t dword_count) override;
@@ -618,6 +619,14 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Native-render RHI device (rex/graphics/native_rhi.h), created lazily on
   // the first swap with a native guest-output renderer registered.
   nrhi::Device* native_rhi_device_ = nullptr;
+  // Native inter-frames (NativeInterFrameHooks, IssueNativeInterFrame): the
+  // last native swap's output parameters, valid while the renderer served it.
+  bool native_inter_frame_valid_ = false;
+  bool native_inter_frame_is_8bpc_ = true;
+  uint32_t native_inter_frame_output_width_ = 0;
+  uint32_t native_inter_frame_output_height_ = 0;
+  uint32_t native_inter_frame_display_width_ = 0;
+  uint32_t native_inter_frame_display_height_ = 0;
 
   // Descriptor set layouts used by different shaders.
   VkDescriptorSetLayout descriptor_set_layout_empty_ = VK_NULL_HANDLE;

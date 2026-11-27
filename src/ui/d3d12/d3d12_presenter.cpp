@@ -628,8 +628,12 @@ bool D3D12Presenter::RefreshGuestOutputImpl(
     guest_output_resource_new_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     guest_output_resource_new_desc.Flags =
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    // Render-target textures are created zeroed (not CREATE_NOT_ZEROED): the
+    // native renderer draws into the guest output before anything clears it,
+    // and an uninitialised render target's compression metadata hangs AMD
+    // GPUs (debug layer error #1422; see native_rhi_d3d12.cpp CreateTexture).
     if (FAILED(device->CreateCommittedResource(
-            &util::kHeapPropertiesDefault, provider_.GetHeapFlagCreateNotZeroed(),
+            &util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE,
             &guest_output_resource_new_desc, kGuestOutputInternalState, nullptr,
             IID_PPV_ARGS(&guest_output_resource_ref.second)))) {
       REXLOG_ERROR("D3D12Presenter: Failed to create the guest output {}x{} texture",
@@ -853,8 +857,9 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
             intermediate_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
             intermediate_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
                                       D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            // Zeroed: render target (see the guest output texture above).
             if (FAILED(device->CreateCommittedResource(
-                    &util::kHeapPropertiesDefault, provider_.GetHeapFlagCreateNotZeroed(),
+                    &util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE,
                     &intermediate_desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
                     IID_PPV_ARGS(&intermediate_texture_ptr_ref)))) {
               REXLOG_ERROR(

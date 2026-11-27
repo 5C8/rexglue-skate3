@@ -34,8 +34,29 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 
 }  // namespace
 
-static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
-   REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
+static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* base) {
+  // Who made the call: lr (the caller's return address, set before every indirect call) and
+  // the guest back chain (0(sp) = caller's sp, saved LR at caller_sp - 8), plus the argument
+  // registers - so a null function pointer can be traced to the game code that loaded it.
+  auto be32 = [base](uint32_t a, uint32_t& v) {
+    if (!base || a < 0x10000 || a >= 0xFFFF0000u || (a & 3)) return false;
+    const uint8_t* p = base + a;
+    v = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+    return true;
+  };
+  std::string chain;
+  uint32_t sp = ctx.r1.u32;
+  for (int i = 0; i < 24; ++i) {
+    uint32_t prev = 0, lr = 0;
+    if (!be32(sp, prev) || prev <= sp || prev - sp > 0x100000 || !be32(prev - 8, lr)) break;
+    chain += fmt::format(" {:08X}", lr);
+    sp = prev;
+  }
+  REXLOG_CRITICAL("[null-call] target={:08X} lr={:08X} ctr={:08X} sp={:08X} r3={:08X} r4={:08X} r5={:08X} r6={:08X}",
+                  ctx.last_indirect_target, uint32_t(ctx.lr), ctx.ctr.u32, ctx.r1.u32, ctx.r3.u32, ctx.r4.u32,
+                  ctx.r5.u32, ctx.r6.u32);
+  REXLOG_CRITICAL("[null-call] guest stack:{}", chain);
+  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
             ctx.last_indirect_target);
 }
 

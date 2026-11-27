@@ -2867,8 +2867,15 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
             // recorded.
             EndSubmission(true);
             InvokeNativeGuestOutputSubmitHook(NativeGuestOutputBackend::kVulkan);
+            native_inter_frame_valid_ = true;
+            native_inter_frame_is_8bpc_ = !use_pwl_gamma_ramp && !use_fxaa;
+            native_inter_frame_output_width_ = guest_output_width;
+            native_inter_frame_output_height_ = guest_output_height;
+            native_inter_frame_display_width_ = display_width;
+            native_inter_frame_display_height_ = display_height;
             return true;
           }
+          native_inter_frame_valid_ = false;
           // The renderer yielded to the emulated path: close anything the
           // callback may have left open (render pass, pending clears) -
           // the gamma pass below records into the same deferred command
@@ -3396,6 +3403,68 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   // End the frame even if did not present for any reason (the image refresher
   // was not called), to prevent leaking per-frame resources.
   EndSubmission(true);
+  NoteNativeGuestSwap();
+}
+
+// One native inter-frame (NativeInterFrameHooks) while the ring is empty:
+// the native renderer re-poses the last guest frame's scene for its display
+// time into a fresh guest output image. Mirrors the native branch of
+// IssueSwap; the D3D12 backend's synchronous IssueNativeInterFrame does the
+// same (its native render thread is D3D12-only).
+bool VulkanCommandProcessor::IssueNativeInterFrame() {
+  if (!native_inter_frame_valid_ || !IsNativeGuestOutputActive() ||
+      !HasNativeGuestOutputRenderer() || !graphics_system_) {
+    return false;
+  }
+  ui::Presenter* presenter = graphics_system_->presenter();
+  if (!presenter) {
+    return false;
+  }
+  const uint32_t output_width = native_inter_frame_output_width_;
+  const uint32_t output_height = native_inter_frame_output_height_;
+  const uint32_t display_width = native_inter_frame_display_width_;
+  const uint32_t display_height = native_inter_frame_display_height_;
+  bool rendered = false;
+  presenter->RefreshGuestOutput(
+      output_width, output_height, display_width, display_height,
+      [this, output_width, output_height, display_width, display_height,
+       &rendered](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+        if (!BeginSubmission(true)) {
+          return false;
+        }
+        context.SetIs8bpc(native_inter_frame_is_8bpc_);
+        auto& vulkan_context =
+            static_cast<ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
+        if (native_rhi_device_ == nullptr) {
+          native_rhi_device_ = CreateNativeRhiDevice(this);
+        }
+        NativeGuestOutputRenderContext native_context;
+        native_context.backend = NativeGuestOutputBackend::kVulkan;
+        native_context.guest_output_width = output_width;
+        native_context.guest_output_height = output_height;
+        native_context.display_width = display_width;
+        native_context.display_height = display_height;
+        native_context.device = native_rhi_device_;
+        native_context.cmd = NativeRhiBeginFrame(
+            native_rhi_device_, vulkan_context.image(), vulkan_context.image_view(),
+            vulkan_context.image_ever_written_previously(), output_width, output_height,
+            &native_context.guest_output);
+        BeginGpuTimestampedRegion(rex::perf::DrawBucket::kNativeScene);
+        const bool ok = TryRenderNativeInterFrame(native_context);
+        NativeRhiEndFrame(native_rhi_device_);
+        if (!ok) {
+          // Keep the previously presented image; the EndSubmission below
+          // closes whatever the renderer recorded.
+          return false;
+        }
+        EndSubmission(true);
+        InvokeNativeGuestOutputSubmitHook(NativeGuestOutputBackend::kVulkan);
+        NoteNativeInterFramePresented();
+        rendered = true;
+        return true;
+      });
+  EndSubmission(true);
+  return rendered;
 }
 
 bool VulkanCommandProcessor::PushBufferMemoryBarrier(

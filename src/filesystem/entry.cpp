@@ -51,7 +51,7 @@ bool Entry::is_read_only() const {
 }
 
 Entry* Entry::GetChild(const std::string_view name) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   auto it = std::find_if(children_.cbegin(), children_.cend(), [&](const auto& child) {
     return rex::string::utf8_equal_case(child->name(), name);
   });
@@ -76,7 +76,7 @@ Entry* Entry::ResolvePath(const std::string_view path) {
 
 Entry* Entry::IterateChildren(const rex::filesystem::WildcardEngine& engine,
                               size_t* current_index) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   while (*current_index < children_.size()) {
     auto& child = children_[*current_index];
     *current_index = *current_index + 1;
@@ -88,7 +88,7 @@ Entry* Entry::IterateChildren(const rex::filesystem::WildcardEngine& engine,
 }
 
 Entry* Entry::CreateEntry(const std::string_view name, uint32_t attributes) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   if (is_read_only()) {
     return nullptr;
   }
@@ -107,7 +107,7 @@ Entry* Entry::CreateEntry(const std::string_view name, uint32_t attributes) {
 }
 
 bool Entry::Delete(Entry* entry) {
-  auto global_lock = global_critical_region_.Acquire();
+  auto global_lock = rex::filesystem::FsLock();
   if (is_read_only()) {
     return false;
   }
